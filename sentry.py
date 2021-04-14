@@ -5,8 +5,10 @@ import shutil
 # whereis_train = '/nfs/home/yfwang/imageNet/h5/no_compress_h5_many'
 # whereis =       '/nfs/home/yfwang/imageNet/h5/no_compress_h5_many/train'
 
-whereis_train = 'D:/github_codes/dataset/animals-10-test-for-h5'
-whereis = 'D:/github_codes/dataset/animals-10-test-for-h5/train'
+#whereis_train = '/mnt/orangefs/Imagenet/tars/h5'
+#whereis = '/mnt/orangefs/Imagenet/tars'
+whereis_train = '/mnt/orangefs/create_Big_h5Data'
+whereis = '/mnt/orangefs/train_value_h5Data'
 name = 'semaphore.npy'
 file_name = os.path.join(whereis, name)
 
@@ -53,6 +55,7 @@ def init():
 def init_producer():
     semaphore = np.load(file_name)
     semaphore[1] = 0
+    semaphore[2] = 1
     np.save(file_name, np.array(semaphore))
 
 def kill_stale():

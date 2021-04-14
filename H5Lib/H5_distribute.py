@@ -11,10 +11,11 @@ from base.common import print_memory_info
 
 
 class HDF5Record(data.Dataset):
-    def __init__(self, root, gap, batch_size, worker_count, h5_package_size, transform=None, target_transform=None):
+    def __init__(self, root, gap, batch_size, worker_count, h5_package_size, world_size=1, transform=None, target_transform=None):
         self.batch_size = batch_size
         self.worker_count = worker_count
         self.h5_package_size = h5_package_size
+        self.world_size = world_size
         self.dbs = []
         h5_dirs = sorted(glob.glob(os.path.join(root, '*.h5')))
         len_array = np.load(os.path.join(root, 'length.npy'))
@@ -26,8 +27,7 @@ class HDF5Record(data.Dataset):
                 h5_file=h,
                 gap=gap,
                 transform=transform,
-                target_transform=target_transform, 
-                length=len_array[index]))
+                target_transform=target_transform, length=len_array[index]))
             index = index + 1
         self.indices = []
         count = 0
@@ -36,7 +36,12 @@ class HDF5Record(data.Dataset):
             self.indices.append(count)
             print("h5 db length: {0}".format(db.length))
         
-        if self.worker_count > 1:
+        if self.world_size > 1:
+            # distribute case
+            self.no_map_index = self.biggest_index // (batch_size * h5_package_size * worker_count * world_size) * (batch_size * h5_package_size * worker_count * world_size)
+            print("h5 dbs lengths: {0}, biggest index: {1}, no map index: {2}".format(len(self.dbs), self.biggest_index, self.no_map_index))
+        elif self.worker_count > 1:
+            # no distribute case, but multiple processes case
             self.no_map_index = self.biggest_index // (batch_size * h5_package_size * worker_count) * (batch_size * h5_package_size * worker_count)
             print("h5 dbs lengths: {0}, biggest index: {1}, no map index: {2}".format(len(self.dbs), self.biggest_index, self.no_map_index))
         else:
@@ -45,10 +50,12 @@ class HDF5Record(data.Dataset):
         self.length = count
 
     def __getitem__(self, index):
-        # print('original index: {0}'.format(index))
-        if self.worker_count > 1:
+        print('original index: {0}'.format(index))
+        if self.world_size > 1:
+            index = self._re_mapping_index_distribute(index)
+        elif self.worker_count > 1:
             index = self._re_mapping_index(index)
-        # print('mapped new index: {0}'.format(index))
+        print('mapped new index: {0}'.format(index))
 
         target = 0
         sub = 0
@@ -71,8 +78,6 @@ class HDF5Record(data.Dataset):
         Premise:
         1. use h5p package
         2. use more than 1 subProcess.
-        3. if find one index which is the big_batch_size * N, and the index plus another big_batch_size is bigger than the biggest data index. Then don't re-mapp it.
-            big_batch_size = h5_size * worker_count
 
         e.g. 
             batch size: 10 
@@ -115,6 +120,30 @@ class HDF5Record(data.Dataset):
         h5_index = int(batch_idx / self.h5_package_size) * h5_size * self.worker_count + worker_id * h5_size + (batch_idx % self.h5_package_size) * self.batch_size + current_remainder
         return h5_index
 
+    def _re_mapping_index_distribute(self, index):
+        ''' 
+        Used for re-mapping input index for distributed training model.
+        Premise:
+        1. at least 2 computing nodes
+        2. use h5p package
+        '''
+        if index >= self.no_map_index:
+            return index
+        
+        gap_size = self.world_size * self.batch_size
+        node_id = index % self.world_size
+        h5_size = self.batch_size * self.h5_package_size
+        # whole_size means the count of pictures it needed if each subProcess per node could get one h5 package data
+        whole_size = h5_size * self.worker_count * self.world_size
+        worker_id = index // gap_size % self.world_size
+        current_remainder = (index - node_id) % gap_size / self.world_size
+
+        A = index // whole_size
+        B = index % whole_size // (self.world_size * self.worker_count * self.batch_size)
+        C = index // (self.world_size * self.worker_count * self.batch_size)
+
+        h5_index = A * whole_size + node_id * h5_size + worker_id * h5_size * self.world_size + B * self.batch_size + current_remainder
+        return h5_index
 
     def __len__(self):
         return self.length

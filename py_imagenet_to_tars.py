@@ -43,7 +43,6 @@ import glob
 import torchvision.transforms as transforms
 from PIL import Image
 import tarfile
-import socket
 from base.common import fun_run_time
 
 DEFAULT_IMAGE_SIZE = 224
@@ -62,31 +61,12 @@ FLAGS = flags.FLAGS
 
 LABELS_FILE = 'synset_labels.txt'
 
-TRAINING_CHUNKSIZES = 1000
-VALIDATION_CHUNKSIZES = 1000
+TRAINING_CHUNKSIZES = 250
+VALIDATION_CHUNKSIZES = 250
 
 TRAINING_DIRECTORY = 'train'
 VALIDATION_DIRECTORY = 'val'
-HOST_NAME = None
-RANK = None
 
-table = {
-    'hec04': 0,
-    'hec05': 1,
-    'hec06': 2,
-    'hec07': 3,
-    'hec08': 4,
-    'hec09': 5,
-    'hec10': 6,
-    'hec11': 7
-}
-
-def get_current_pc_name():
-    global HOST_NAME, RANK
-    HOST_NAME = socket.gethostname()
-    RANK = table[HOST_NAME]
-
-get_current_pc_name()
 
 def _check_or_create_dir(directory):
     """Check if directory exists otherwise create it."""
@@ -132,32 +112,36 @@ def _is_cmyk(filename):
                                      'n07583066_647.JPEG', 'n13037406_4650.JPEG'])
     return os.path.basename(filename) in blacklist
 
+def _process_image(filename):
+    """Process a single image file.
 
-def _get_bytes_from_image(image_path):
-    bytes_content = None
-    with open(image_path, 'rb') as f:
-        bytes_content = f.read()
-    return bytes_content
+    Args:
+        filename: string, path to an image file e.g., '/path/to/example.JPG'.
+    Returns:
+        image_buffer: string, JPEG encoding of RGB image.
+        height: integer, image height in pixels.
+        width: integer, image width in pixels.
+    """
+    image_data = Image.open(filename).convert('RGB')
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize,
+    ])
 
+    image_data = np.array(transform(image_data))
+    return image_data, DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE
 
 def _package_images_batch(output_file, files, synsets, labels):
-    int_labels = []
-    images = []
-    for file_info, synset in zip(files, synsets):
-        cur_label = labels[synset]
-        cur_image_buffer = _get_bytes_from_image(file_info)
-        int_labels.append(cur_label)
-        images.append(cur_image_buffer)
-
-    with h5py.File(output_file, 'w') as hf:
-        images_shape = (len(images),)
-        dt = h5py.special_dtype(vlen=np.dtype('uint8'))
-        dset_images = hf.create_dataset('images', shape=images_shape, dtype=dt)
-        dset_labels = hf.create_dataset('labels', shape=images_shape, dtype='uint16')
-        
-        for index, image_buffer in enumerate(images):
-            dset_images[index] = list(image_buffer)
-            dset_labels[index] = int_labels[index]
+    temp_label_file = 'labels.txt'
+    with tarfile.open(output_file, 'w') as tf:
+        for file_info, synset in zip(files, synsets):
+            file_name = os.path.basename(file_info)
+            new_name = 'lab{0}_{1}'.format(labels[synset], file_name)
+            print('file_info: {0}, file_name: {1}'.format(file_info, new_name))
+            tf.add(file_info, new_name)
 
 
 def _process_dataset(filenames, synsets, labels, output_directory, prefix, chunksize):
@@ -182,13 +166,13 @@ def _process_dataset(filenames, synsets, labels, output_directory, prefix, chunk
     for shard in range(num_shards):
         chunk_files = filenames[shard * chunksize : (shard + 1) * chunksize]
         chunk_synsets = synsets[shard * chunksize : (shard + 1) * chunksize]
-        h5_output_file = os.path.join(output_directory, '%s-%s-%.5d-of-%.5d_%.6d.h5' % (HOST_NAME, prefix, shard, num_shards, len(chunk_files)))
-        _package_images_batch(h5_output_file, chunk_files, chunk_synsets, labels)
-        print('Finished writing file: {0}'.format(h5_output_file))
-        files.append(h5_output_file)
+        tar_output_file = os.path.join(output_directory, '%s-%.5d-of-%.5d.tar' % (prefix, shard, num_shards))
+        _package_images_batch(tar_output_file, chunk_files, chunk_synsets, labels)
+        print('Finished writing file: {0}'.format(tar_output_file))
+        files.append(tar_output_file)
         package_size_info.append(len(chunk_files))
 
-    update_h5_package_info(os.path.join(output_directory, '{0}_length.npy'.format(HOST_NAME)), package_size_info)
+    update_h5_package_info(os.path.join(output_directory, 'length.npy'), package_size_info)
     return files
 
 def update_h5_package_info(path, info):
@@ -209,7 +193,7 @@ def convert_to_h5_records(raw_data_dir):
 
     # Shuffle training records to ensure we are distributing classes
     # across the batches.
-    random.seed(0)
+    # random.seed(0)
     def make_shuffle_idx(n):
         order = list(range(n))
         random.shuffle(order)
@@ -221,10 +205,16 @@ def convert_to_h5_records(raw_data_dir):
     # training_files = glob.glob(os.path.join(raw_data_dir, TRAINING_DIRECTORY, '*', '*.JPG'))
     print('所有的训练数据数量：{}'.format(len(training_files)))
 
+
+    training_shuffle_idx = make_shuffle_idx(len(training_files))
+    training_files = [training_files[i] for i in training_shuffle_idx]
+
+    # Get training file synset labels from the directory name
     training_synsets = [os.path.basename(os.path.dirname(f)) for f in training_files]
+    # training_synsets = [training_synsets[i].encode() for i in training_shuffle_idx]
 
     # Glob all the validation files
-    validation_files = glob.glob(os.path.join(raw_data_dir, VALIDATION_DIRECTORY, '*', '*.JPEG'))
+    validation_files = sorted(glob.glob(os.path.join(raw_data_dir, VALIDATION_DIRECTORY, '*', '*.JPEG')))
     # validation_files = sorted(glob.glob(os.path.join(raw_data_dir, VALIDATION_DIRECTORY, '*.JPG')))
     print('val数据量：{}'.format(len(validation_files)))
     # Get validation file synset labels from labels.txt
@@ -234,34 +224,18 @@ def convert_to_h5_records(raw_data_dir):
     # validation_synsets_strlist = [str(item) for item in validation_synsets]
     labels = {v: k for k, v in enumerate(sorted(set(validation_synsets + training_synsets)))}
     print('labels_总数量：{}'.format(len(labels)))
+    # Create training data
     
-    loop_time = 0
-    cur_host_training_files = []
-    while training_files[(loop_time * 8 + RANK) * TRAINING_CHUNKSIZES: (loop_time * 8 + RANK + 1) * TRAINING_CHUNKSIZES]:
-        cur_host_training_files.extend(training_files[(loop_time * 8 + RANK) * TRAINING_CHUNKSIZES: (loop_time * 8 + RANK + 1) * TRAINING_CHUNKSIZES])
-        loop_time += 1
-    
-    cur_host_training_synsets = [os.path.basename(os.path.dirname(f)) for f in cur_host_training_files]
-
     print('Processing the training data.')
     training_records = _process_dataset(
-        cur_host_training_files, cur_host_training_synsets, labels,
+        training_files, training_synsets, labels,
         os.path.join(FLAGS.local_scratch_dir, TRAINING_DIRECTORY),
         TRAINING_DIRECTORY, TRAINING_CHUNKSIZES)
     print('train_filepath_h5record_len: {0}'.format(len(training_records)))
     # Create validation data
     print('Processing the validation data.')
-
-    loop_time = 0
-    cur_host_val_files = []
-    while validation_files[(loop_time * 8 + RANK) * VALIDATION_CHUNKSIZES: (loop_time * 8 + RANK + 1) * VALIDATION_CHUNKSIZES]:
-        cur_host_val_files.extend(training_files[(loop_time * 8 + RANK) * VALIDATION_CHUNKSIZES: (loop_time * 8 + RANK + 1) * VALIDATION_CHUNKSIZES])
-        loop_time += 1
-    
-    cur_host_val_synsets = [os.path.basename(os.path.dirname(f)) for f in cur_host_val_files]
-
     validation_records = _process_dataset(
-        cur_host_val_files, cur_host_val_synsets, labels,
+        validation_files, validation_synsets, labels,
         os.path.join(FLAGS.local_scratch_dir, VALIDATION_DIRECTORY),
         VALIDATION_DIRECTORY, VALIDATION_CHUNKSIZES)
     print('vali_filepath_h5record_len: {0}'.format(len(validation_records)))

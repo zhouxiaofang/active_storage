@@ -7,6 +7,7 @@ import warnings
 import json
 import glob
 import math
+from memory_profiler import profile
 
 import threading
 import torch
@@ -175,6 +176,7 @@ def main():
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
+# @profile(precision=4,stream=open('memory_profiler.log','w+'))
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
@@ -322,6 +324,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best)
         # sentry.add_slow()
 
+# @profile(precision=4,stream=open('memory_profiler.log','w+'))
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.10f')
     data_time = AverageMeter('Data', ':6.10f')

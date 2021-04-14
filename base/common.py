@@ -1,6 +1,8 @@
 import time
 from functools import wraps
 import psutil
+import socket
+
 
 def fun_run_time(func):
     ''' Used to calculate the running time of decorated function. ''' 
@@ -27,3 +29,11 @@ def print_memory_info(str_output):
     print('系统-{0}-总计内存:{1} M.'.format(str_output, zj))
     print('系统-{0}-已经使用内存:{1} M.'.format(str_output, ysy))
     print('系统-{0}-空闲内存:{1} M.'.format(str_output, kx))
+
+
+def get_cpu_percent():
+    return psutil.cpu_percent()
+
+
+def get_current_pc_name():
+    return socket.gethostname()
